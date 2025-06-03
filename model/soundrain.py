@@ -37,53 +37,10 @@ from audiolm_pytorch.version import __version__
 from packaging import version
 parsed_version = version.parse(__version__)
 
+from utils import *
+from loss import *
+
 import pickle
-
-# helper functions
-
-def exists(val):
-    return val is not None
-
-def default(val, d):
-    return val if exists(val) else d
-
-def cast_tuple(t, l = 1):
-    return ((t,) * l) if not isinstance(t, tuple) else t
-
-def filter_by_keys(fn, d):
-    return {k: v for k, v in d.items() if fn(k)}
-
-def map_keys(fn, d):
-    return {fn(k): v for k, v in d.items()}
-
-# gan losses
-
-def log(t, eps = 1e-20):
-    return torch.log(t.clamp(min = eps))
-
-def hinge_discr_loss(fake, real):
-    return (F.relu(1 + fake) + F.relu(1 - real)).mean()
-
-def hinge_gen_loss(fake):
-    return -fake.mean()
-
-def leaky_relu(p = 0.1):
-    return nn.LeakyReLU(p)
-
-def gradient_penalty(wave, output, weight = 10, center = 0.):
-    batch_size, device = wave.shape[0], wave.device
-
-    gradients = torch_grad(
-        outputs = output,
-        inputs = wave,
-        grad_outputs = torch.ones_like(output),
-        create_graph = True,
-        retain_graph = True,
-        only_inputs = True
-    )[0]
-
-    gradients = rearrange(gradients, 'b ... -> b (...)')
-    return weight * ((vector_norm(gradients, dim = 1) - center) ** 2).mean()
 
 # better sequential
 
