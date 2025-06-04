@@ -408,7 +408,7 @@ class FiLM(Module):
         gamma, beta = self.to_cond(cond).chunk(2, dim = -1)
         return x * gamma + beta
 
-class SoundStream(Module):
+class SoundRain(Module):
     def __init__(
         self,
         *,

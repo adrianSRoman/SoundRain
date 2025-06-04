@@ -2,6 +2,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+def mse_loss():
+    return torch.nn.MSELoss()
+
+def l1_loss():
+    return torch.nn.L1Loss()
+
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
 
