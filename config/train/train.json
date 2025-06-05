@@ -7,9 +7,9 @@
         "module": "trainer.trainer",
         "main": "Trainer",
         "epochs": 100,
-        "save_checkpoint_interval": 2,
+        "save_checkpoint_interval": 4,
         "validation": {
-            "interval": 2,
+            "interval": 4,
             "find_max": true,
             "custom": {
                 "visualize_audio_limit": 20,
@@ -38,7 +38,7 @@
         "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/train_dataset.txt",
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
             "limit": null,
             "offset": 0,
             "sample_length": 16000,
