@@ -6,16 +6,16 @@
     "trainer": {
         "module": "trainer.trainer",
         "main": "Trainer",
-        "epochs": 1200,
-        "save_checkpoint_interval": 10,
+        "epochs": 100,
+        "save_checkpoint_interval": 2,
         "validation": {
-            "interval": 10,
+            "interval": 2,
             "find_max": true,
             "custom": {
                 "visualize_audio_limit": 20,
                 "visualize_waveform_limit": 20,
                 "visualize_spectrogram_limit": 20,
-                "sample_length": 16384
+                "sample_length": 16000
             }
         }
     },
@@ -30,34 +30,34 @@
         "args": {}
     },
     "optimizer": {
-        "lr": 0.001,
+        "lr": 0.00001,
         "beta1": 0.9,
         "beta2": 0.999
     },
     "train_dataset": {
-        "module": "dataset.waveform_dataset",
+        "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "~/Datasets/SEGAN_Dataset/train_dataset.txt",
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/train_dataset.txt",
             "limit": null,
             "offset": 0,
-            "sample_length": 16384,
+            "sample_length": 16000,
             "mode": "train"
         }
     },
     "validation_dataset": {
-        "module": "dataset.waveform_dataset",
+        "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "~/Datasets/SEGAN_Dataset/test_dataset.txt",
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
             "limit": 400,
             "offset": 0,
             "mode": "validation"
         }
     },
     "train_dataloader": {
-        "batch_size": 120,
-        "num_workers": 40,
+        "batch_size": 32,
+        "num_workers": 20,
         "shuffle": true,
         "pin_memory": true
     }

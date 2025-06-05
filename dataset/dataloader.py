@@ -56,12 +56,12 @@ class Dataset(data.Dataset):
     def __getitem__(self, item):
         mic_path, foa_path = self.dataset_list[item].split(" ")
         filename = os.path.splitext(os.path.basename(mic_path))[0]
-        mic_sig, _ = librosa.load(os.path.abspath(os.path.expanduser(mic_path)), sr=None)
-        foa_sig, _ = librosa.load(os.path.abspath(os.path.expanduser(foa_path)), sr=None)
+        mic_sig, _ = librosa.load(os.path.abspath(os.path.expanduser(mic_path)), sr=None, mono=False)
+        foa_sig, _ = librosa.load(os.path.abspath(os.path.expanduser(foa_path)), sr=None, mono=False)
 
         if self.mode == "train":
             # The input of model should be fixed-length in the training.
             mic_sig, foa_sig = sample_fixed_length_data_aligned(mic_sig, foa_sig, self.sample_length)
-            return mic_sig.reshape(1, -1), foa_sig.reshape(1, -1), filename
+            return mic_sig, foa_sig, filename
         else:
-            return mic_sig.reshape(1, -1), foa_sig.reshape(1, -1), filename
+            return mic_sig, foa_sig, filename
