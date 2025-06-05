@@ -75,7 +75,7 @@ class Trainer(BaseTrainer):
             for chunk in mixture_chunks:
                 enhanced_chunks.append(self.model(chunk).detach().cpu())
 
-            enhanced = torch.cat(enhanced_chunks, dim=-1)  # [1, 1, T]
+            enhanced = torch.cat(enhanced_chunks, dim=-1)  # [1, 4, T]
             enhanced = enhanced if padded_length == 0 else enhanced[:, :, :-padded_length]
             mixture = mixture if padded_length == 0 else mixture[:, :, :-padded_length]
 
