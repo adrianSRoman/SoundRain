@@ -1,0 +1,64 @@
+{
+    "seed": 0,
+    "description": "...des",
+    "root_dir": "/home/asroman/repos/SoundRain",
+    "cudnn_deterministic": false,
+    "trainer": {
+        "module": "trainer.trainer",
+        "main": "Trainer",
+        "epochs": 100,
+        "save_checkpoint_interval": 4,
+        "validation": {
+            "interval": 4,
+            "find_max": true,
+            "custom": {
+                "visualize_audio_limit": 20,
+                "visualize_waveform_limit": 20,
+                "visualize_spectrogram_limit": 20,
+                "sample_length": 16000
+            }
+        }
+    },
+    "model": {
+        "module": "model.soundrain",
+        "main": "SoundRain",
+        "args": {}
+    },
+    "loss_function": {
+        "module": "model.loss",
+        "main": "mse_loss",
+        "args": {}
+    },
+    "optimizer": {
+        "lr": 0.00001,
+        "beta1": 0.9,
+        "beta2": 0.999
+    },
+    "train_dataset": {
+        "module": "dataset.dataloader",
+        "main": "Dataset",
+        "args": {
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
+            "limit": null,
+            "offset": 0,
+            "sample_length": 16000,
+            "mode": "train"
+        }
+    },
+    "validation_dataset": {
+        "module": "dataset.dataloader",
+        "main": "Dataset",
+        "args": {
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
+            "limit": 400,
+            "offset": 0,
+            "mode": "validation"
+        }
+    },
+    "train_dataloader": {
+        "batch_size": 32,
+        "num_workers": 20,
+        "shuffle": true,
+        "pin_memory": true
+    }
+}
