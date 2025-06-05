@@ -1,6 +1,6 @@
 import argparse
 import os
-
+import wandb
 import json5
 import numpy as np
 import torch
@@ -26,9 +26,9 @@ def main(config, resume):
         batch_size=1
     )
 
-    #wandb.init(project="SoundRain", 
-    #    config=config
-    #)
+    wandb.init(project="SoundRain", 
+        config=config
+    )
 
     model = initialize_config(config["model"])
 
