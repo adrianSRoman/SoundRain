@@ -3,9 +3,9 @@ import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import wandb
 
 from trainer.base_trainer import BaseTrainer
-#from util.utils import compute_STOI, compute_PESQ
 plt.switch_backend('agg')
 
 
@@ -41,10 +41,11 @@ class Trainer(BaseTrainer):
             print("Loss ", loss_total)
 
         dl_len = len(self.train_data_loader)
-        self.writer.add_scalar(f"Train/Loss", loss_total / dl_len, epoch)
+        wandb.log({"Loss/train": loss_total / dl_len}, step=epoch)
 
     @torch.no_grad()
     def _validation_epoch(self, epoch):
+        loss_total = 0.0 # total loss for validation
         visualize_audio_limit = self.validation_custom_config["visualize_audio_limit"]
         visualize_waveform_limit = self.validation_custom_config["visualize_waveform_limit"]
         visualize_spectrogram_limit = self.validation_custom_config["visualize_spectrogram_limit"]
@@ -73,7 +74,12 @@ class Trainer(BaseTrainer):
 
             enhanced_chunks = []
             for chunk in mixture_chunks:
-                enhanced_chunks.append(self.model(chunk).detach().cpu())
+                enhanced = self.model(chunk)
+                loss = self.loss_function(clean, enhanced)
+                loss_total += loss.item()
+
+                enhanced = enhanced.detach().cpu()
+                enhanced_chunks.append(enhanced)
 
             enhanced = torch.cat(enhanced_chunks, dim=-1)  # [1, 4, T]
             enhanced = enhanced if padded_length == 0 else enhanced[:, :, :-padded_length]
@@ -85,6 +91,10 @@ class Trainer(BaseTrainer):
 
             assert len(mixture) == len(enhanced) == len(clean)
 
-        score = 0
 
-        return score
+        dl_len = len(self.validation_data_loader)
+        val_loss_avg = loss_total / dl_len
+        print("Loss validation", val_loss_avg)
+        wandb.log({"Loss/val": val_loss_avg}, step=epoch)
+
+        return val_loss_avg
