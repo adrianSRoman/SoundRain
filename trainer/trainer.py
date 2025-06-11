@@ -63,22 +63,25 @@ class Trainer(BaseTrainer):
             padded_length = 0
 
             mixture = mixture.to(self.device)  # [1, 4, T]
+            clean = clean.to(self.device) # [1, 4, T]
 
             # The input of the model should be fixed length.
             if mixture.size(-1) % sample_length != 0:
                 padded_length = sample_length - (mixture.size(-1) % sample_length)
                 mixture = torch.cat([mixture, torch.zeros(1, 4, padded_length, device=self.device)], dim=-1)
+                clean = torch.cat([clean, torch.zeros(1, 4, padded_length, device=self.device)], dim=-1)
 
             assert mixture.size(-1) % sample_length == 0 and mixture.dim() == 3
             mixture_chunks = list(torch.split(mixture, sample_length, dim=-1))
+            clean_chunks = list(torch.split(clean, sample_length, dim=-1))
 
             enhanced_chunks = []
-            for chunk in mixture_chunks:
-                enhanced = self.model(chunk)
-                loss = self.loss_function(clean, enhanced)
+            for mix_chunk, clean_chunk in zip(mixture_chunks, clean_chunks):
+                enhanced_chunk = self.model(mix_chunk)
+                loss = self.loss_function(clean_chunk, enhanced_chunk)
                 loss_total += loss.item()
 
-                enhanced = enhanced.detach().cpu()
+                enhanced = enhanced_chunk.detach().cpu()
                 enhanced_chunks.append(enhanced)
 
             enhanced = torch.cat(enhanced_chunks, dim=-1)  # [1, 4, T]
@@ -86,11 +89,9 @@ class Trainer(BaseTrainer):
             mixture = mixture if padded_length == 0 else mixture[:, :, :-padded_length]
 
             enhanced = enhanced.reshape(-1).numpy()
-            clean = clean.numpy().reshape(-1)
             mixture = mixture.cpu().numpy().reshape(-1)
 
-            assert len(mixture) == len(enhanced) == len(clean)
-
+            assert len(mixture) == len(enhanced) 
 
         dl_len = len(self.validation_data_loader)
         val_loss_avg = loss_total / dl_len
