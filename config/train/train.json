@@ -38,7 +38,7 @@
         "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
+            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/train_dataset.txt",
             "limit": null,
             "offset": 0,
             "sample_length": 16000,
