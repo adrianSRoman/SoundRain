@@ -3,9 +3,9 @@ import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import wandb
 
 from trainer.base_trainer import BaseTrainer
-#from util.utils import compute_STOI, compute_PESQ
 plt.switch_backend('agg')
 
 
@@ -41,10 +41,11 @@ class Trainer(BaseTrainer):
             print("Loss ", loss_total)
 
         dl_len = len(self.train_data_loader)
-        self.writer.add_scalar(f"Train/Loss", loss_total / dl_len, epoch)
+        wandb.log({"Loss/train": loss_total / dl_len}, step=epoch)
 
     @torch.no_grad()
     def _validation_epoch(self, epoch):
+        loss_total = 0.0 # total loss for validation
         visualize_audio_limit = self.validation_custom_config["visualize_audio_limit"]
         visualize_waveform_limit = self.validation_custom_config["visualize_waveform_limit"]
         visualize_spectrogram_limit = self.validation_custom_config["visualize_spectrogram_limit"]
@@ -62,29 +63,39 @@ class Trainer(BaseTrainer):
             padded_length = 0
 
             mixture = mixture.to(self.device)  # [1, 4, T]
+            clean = clean.to(self.device) # [1, 4, T]
 
             # The input of the model should be fixed length.
             if mixture.size(-1) % sample_length != 0:
                 padded_length = sample_length - (mixture.size(-1) % sample_length)
                 mixture = torch.cat([mixture, torch.zeros(1, 4, padded_length, device=self.device)], dim=-1)
+                clean = torch.cat([clean, torch.zeros(1, 4, padded_length, device=self.device)], dim=-1)
 
             assert mixture.size(-1) % sample_length == 0 and mixture.dim() == 3
             mixture_chunks = list(torch.split(mixture, sample_length, dim=-1))
+            clean_chunks = list(torch.split(clean, sample_length, dim=-1))
 
             enhanced_chunks = []
-            for chunk in mixture_chunks:
-                enhanced_chunks.append(self.model(chunk).detach().cpu())
+            for mix_chunk, clean_chunk in zip(mixture_chunks, clean_chunks):
+                enhanced_chunk = self.model(mix_chunk)
+                loss = self.loss_function(clean_chunk, enhanced_chunk)
+                loss_total += loss.item()
+
+                enhanced = enhanced_chunk.detach().cpu()
+                enhanced_chunks.append(enhanced)
 
             enhanced = torch.cat(enhanced_chunks, dim=-1)  # [1, 4, T]
             enhanced = enhanced if padded_length == 0 else enhanced[:, :, :-padded_length]
             mixture = mixture if padded_length == 0 else mixture[:, :, :-padded_length]
 
             enhanced = enhanced.reshape(-1).numpy()
-            clean = clean.numpy().reshape(-1)
             mixture = mixture.cpu().numpy().reshape(-1)
 
-            assert len(mixture) == len(enhanced) == len(clean)
+            assert len(mixture) == len(enhanced) 
 
-        score = 0
+        dl_len = len(self.validation_data_loader)
+        val_loss_avg = loss_total / dl_len
+        print("Loss validation", val_loss_avg)
+        wandb.log({"Loss/val": val_loss_avg}, step=epoch)
 
-        return score
+        return val_loss_avg
