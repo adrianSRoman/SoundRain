@@ -27,13 +27,15 @@ class Trainer(BaseTrainer):
     def _train_epoch(self, epoch):
         loss_total = 0.0
 
-        for i, (mixture, clean, name) in enumerate(self.train_data_loader):
-            mixture = mixture.to(self.device)
-            clean = clean.to(self.device)
+        for i, (audio_sig, cov_matrix, name) in enumerate(self.train_data_loader):
+            # For now, we only use audio_sig (cov_matrix will be used in future updates)
+            # Treat audio_sig as both mixture and clean for current compatibility
+            audio_sig = audio_sig.to(self.device) # [1, 4, T]
 
             self.optimizer.zero_grad()
-            enhanced = self.model(mixture)
-            loss = self.loss_function(clean, enhanced)
+            enhanced = self.model(audio_sig)
+            # For now, use the same audio_sig as target (this will need to be updated when you have proper targets)
+            loss = self.loss_function(audio_sig, enhanced)
             loss.backward()
             self.optimizer.step()
 
@@ -52,18 +54,16 @@ class Trainer(BaseTrainer):
 
         sample_length = self.validation_custom_config["sample_length"]
 
-        stoi_c_n = []  # clean and noisy
-        stoi_c_e = []  # clean and enhanced
-        pesq_c_n = []
-        pesq_c_e = []
-
-        for i, (mixture, clean, name) in enumerate(self.validation_data_loader):
+        for i, (audio_sig, cov_matrix, name) in enumerate(self.validation_data_loader):
             assert len(name) == 1, "Only support batch size is 1 in enhancement stage."
             name = name[0]
             padded_length = 0
 
-            mixture = mixture.to(self.device)  # [1, 4, T]
-            clean = clean.to(self.device) # [1, 4, T]
+            # For now, we only use audio_sig (cov_matrix will be used in future updates)
+            audio_sig = audio_sig.to(self.device)  # [1, 4, T]
+            # Use same signal as both mixture and clean for current compatibility
+            mixture = audio_sig
+            clean = audio_sig
 
             # The input of the model should be fixed length.
             if mixture.size(-1) % sample_length != 0:

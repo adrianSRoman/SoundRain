@@ -38,10 +38,9 @@
         "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/train_dataset.txt",
+            "dataset": "/scratch/ssd1/soundrain_hdf_data/starss23_train.hdf5",
             "limit": null,
             "offset": 0,
-            "sample_length": 16000,
             "mode": "train"
         }
     },
@@ -49,7 +48,7 @@
         "module": "dataset.dataloader",
         "main": "Dataset",
         "args": {
-            "dataset": "/home/asroman/repos/SoundRain/dataset/splits/test_dataset.txt",
+            "dataset": "/scratch/ssd1/soundrain_hdf_data/starss23_test.hdf5",
             "limit": 400,
             "offset": 0,
             "mode": "validation"
