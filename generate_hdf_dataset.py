@@ -189,6 +189,9 @@ class HDF5DatasetGenerator:
         """
         try:
             sample_rate, audio_data = wavfile.read(file_path)
+
+            if audio_data.shape[-1] == 32:
+                audio_data = audio_data[:, [5,9,25,21]] # 4 ch raw MIC
             
             # Ensure audio is 2D (samples, channels)
             if audio_data.ndim == 1:
@@ -198,7 +201,7 @@ class HDF5DatasetGenerator:
                 audio_data, sample_rate
             )
             
-            logging.info(f"Processed {file_path}: {framed_audio.shape[0]} frames")
+            logging.info(f"Processed {file_path}: {framed_audio.shape[0]} frames, {framed_audio.shape[-1]} channels")
             return framed_audio, visibility_matrices, sample_rate
             
         except Exception as e:
@@ -229,16 +232,14 @@ class HDF5DatasetGenerator:
         for file_path in tqdm(audio_files, desc="Processing audio files"):
             framed_audio, visibility_matrices, sample_rate = self._process_single_file(file_path)
 
-            print("Shape of framed audio:", framed_audio.shape, visibility_matrices.shape)
-
-            if framed_audio.shape[0] > 0:  # Only add if frames were created
+            if framed_audio.shape[0] == visibility_matrices.shape[0]:  # Only add if frames were created
                 all_framed_audio.append(framed_audio)
                 all_visibility_matrices.append(visibility_matrices)
                 sample_rates.append(sample_rate)
         
         if not all_framed_audio:
             raise ValueError("No valid frames were generated from any audio files")
-            
+
         # Concatenate all data
         final_audio = np.concatenate(all_framed_audio, axis=0)
         final_visibility = np.concatenate(all_visibility_matrices, axis=0)
