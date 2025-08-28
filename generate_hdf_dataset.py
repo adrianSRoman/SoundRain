@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+from scipy.signal import resample_poly
 from typing import List, Tuple, Optional
 import logging
 
@@ -190,6 +191,16 @@ class HDF5DatasetGenerator:
         try:
             sample_rate, audio_data = wavfile.read(file_path)
 
+            # resample to 48kHz with scipy
+            if sample_rate != 48000:
+                # Compute up/down factors
+                gcd = np.gcd(sample_rate, 48000)
+                up = 48000 // gcd
+                down = sample_rate // gcd
+                
+                audio_data = resample_poly(audio_data, up, down)
+                sample_rate = 48000
+
             if audio_data.shape[-1] == 32:
                 audio_data = audio_data[:, [5,9,25,21]] # 4 ch raw MIC
             
@@ -231,6 +242,10 @@ class HDF5DatasetGenerator:
         # Process each file
         for file_path in tqdm(audio_files, desc="Processing audio files"):
             framed_audio, visibility_matrices, sample_rate = self._process_single_file(file_path)
+
+            print("Shapes:")
+            print(f"Framed audio: {framed_audio.shape}")
+            print(f"Visibility matrices: {visibility_matrices.shape}")
 
             if framed_audio.shape[0] == visibility_matrices.shape[0]:  # Only add if frames were created
                 all_framed_audio.append(framed_audio)
