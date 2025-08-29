@@ -5,6 +5,7 @@ from torch.autograd import grad as torch_grad
 from einops import rearrange
 from torch.linalg import vector_norm
 import torchaudio
+import typing as tp
 
 
 def mse_loss():
@@ -19,12 +20,21 @@ def log(t, eps=1e-20):
     return torch.log(t.clamp(min=eps))
 
 
-def hinge_discr_loss(fake, real):
-    return (F.relu(1 + fake) + F.relu(1 - real)).mean()
+# Discriminator hinge losses
+def hinge_discriminator_real_loss(real_outputs):
+    """Hinge loss for discriminator on real data: max(0, 1 - real)"""
+    return F.relu(1.0 - real_outputs).mean()
 
 
-def hinge_gen_loss(fake):
-    return -fake.mean()
+def hinge_discriminator_fake_loss(fake_outputs):
+    """Hinge loss for discriminator on fake data: max(0, 1 + fake)"""
+    return F.relu(1.0 + fake_outputs).mean()
+
+
+# Generator hinge loss  
+def hinge_generator_loss(fake_outputs):
+    """Hinge loss for generator: -fake"""
+    return -fake_outputs.mean()
 
 
 def leaky_relu(p=0.1):
@@ -47,226 +57,423 @@ def gradient_penalty(wave, output, weight=10, center=0.):
     return weight * ((vector_norm(gradients, dim=1) - center) ** 2).mean()
 
 
-class SpectralLoss(nn.Module):
-    """Multi-scale spectral loss for time-frequency domain reconstruction."""
+def _stft(x: torch.Tensor, fft_size: int, hop_length: int, win_length: int,
+          window: tp.Optional[torch.Tensor], normalized: bool) -> torch.Tensor:
+    """Perform STFT and convert to magnitude spectrogram.
+    Args:
+        x: Input signal tensor (B, C, T).
+        fft_size (int): FFT size.
+        hop_length (int): Hop size.
+        win_length (int): Window length.
+        window (torch.Tensor or None): Window function type.
+        normalized (bool): Whether to normalize the STFT or not.
+    Returns:
+        torch.Tensor: Magnitude spectrogram (B, C, #frames, fft_size // 2 + 1).
+    """
+    B, C, T = x.shape
+    x_stft = torch.stft(
+        x.view(-1, T), fft_size, hop_length, win_length, window,
+        normalized=normalized, return_complex=True,
+    )
+    x_stft = x_stft.view(B, C, *x_stft.shape[1:])
+    real = x_stft.real
+    imag = x_stft.imag
+
+    # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
+    return torch.sqrt(torch.clamp(real ** 2 + imag ** 2, min=1e-7)).transpose(2, 1)
+
+
+class SpectralConvergenceLoss(nn.Module):
+    """Spectral convergence loss."""
+    def __init__(self, epsilon: float = torch.finfo(torch.float32).eps):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x_mag: torch.Tensor, y_mag: torch.Tensor):
+        """Calculate forward propagation.
+        Args:
+            x_mag: Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag: Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+        Returns:
+            torch.Tensor: Spectral convergence loss value.
+        """
+        return torch.norm(y_mag - x_mag, p="fro") / (torch.norm(y_mag, p="fro") + self.epsilon)
+
+
+class LogSTFTMagnitudeLoss(nn.Module):
+    """Log STFT magnitude loss.
+    Args:
+        epsilon (float): Epsilon value for numerical stability.
+    """
+    def __init__(self, epsilon: float = torch.finfo(torch.float32).eps):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x_mag: torch.Tensor, y_mag: torch.Tensor):
+        """Calculate forward propagation.
+        Args:
+            x_mag (torch.Tensor): Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag (torch.Tensor): Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+        Returns:
+            torch.Tensor: Log STFT magnitude loss value.
+        """
+        return F.l1_loss(torch.log(self.epsilon + y_mag), torch.log(self.epsilon + x_mag))
+
+
+class STFTLosses(nn.Module):
+    """STFT losses.
+    Args:
+        n_fft (int): Size of FFT.
+        hop_length (int): Hop length.
+        win_length (int): Window length.
+        window (str): Window function type.
+        normalized (bool): Whether to use normalized STFT or not.
+        epsilon (float): Epsilon for numerical stability.
+    """
+    def __init__(self, n_fft: int = 1024, hop_length: int = 120, win_length: int = 600,
+                 window: str = "hann_window", normalized: bool = False,
+                 epsilon: float = torch.finfo(torch.float32).eps):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.normalized = normalized
+        self.register_buffer("window", getattr(torch, window)(win_length))
+        self.spectral_convergence_loss = SpectralConvergenceLoss(epsilon)
+        self.log_stft_magnitude_loss = LogSTFTMagnitudeLoss(epsilon)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> tp.Tuple[torch.Tensor, torch.Tensor]:
+        """Calculate forward propagation.
+        Args:
+            x (torch.Tensor): Predicted signal (B, T).
+            y (torch.Tensor): Groundtruth signal (B, T).
+        Returns:
+            torch.Tensor: Spectral convergence loss value.
+            torch.Tensor: Log STFT magnitude loss value.
+        """
+        # Ensure window is on the same device as input
+        window = self.window.to(x.device)
+        
+        x_mag = _stft(x, self.n_fft, self.hop_length,
+                      self.win_length, window, self.normalized)  # type: ignore
+        y_mag = _stft(y, self.n_fft, self.hop_length,
+                      self.win_length, window, self.normalized)  # type: ignore
+        sc_loss = self.spectral_convergence_loss(x_mag, y_mag)
+        mag_loss = self.log_stft_magnitude_loss(x_mag, y_mag)
+
+        return sc_loss, mag_loss
+
+
+class STFTLoss(nn.Module):
+    """Multi-resolution STFT loss for SoundStream reconstruction.
+    
+    Combines spectral convergence loss and log magnitude loss across multiple scales.
+    This is more comprehensive than simple L1 loss in STFT domain.
+    """
     
     def __init__(self, 
-                 fft_sizes=[2048, 1024, 512, 256, 128], 
-                 hop_lengths=None, 
-                 win_lengths=None,
-                 alpha=1.0, 
-                 beta=1.0):
+                 n_ffts: tp.Sequence[int] = [2048, 1024, 512, 256, 128],
+                 hop_lengths: tp.Optional[tp.Sequence[int]] = None, 
+                 win_lengths: tp.Optional[tp.Sequence[int]] = None,
+                 window: str = "hann_window",
+                 factor_sc: float = 0.1,
+                 factor_mag: float = 0.1,
+                 normalized: bool = False,
+                 epsilon: float = torch.finfo(torch.float32).eps):
         super().__init__()
-        self.fft_sizes = fft_sizes
-        self.hop_lengths = hop_lengths or [f // 4 for f in fft_sizes]
-        self.win_lengths = win_lengths or fft_sizes
-        self.alpha = alpha  # Weight for spectral convergence
-        self.beta = beta    # Weight for log magnitude loss
         
-    def stft(self, x, fft_size, hop_length, win_length):
-        """Compute STFT."""
-        return torch.stft(
-            x, 
-            n_fft=fft_size, 
-            hop_length=hop_length, 
-            win_length=win_length,
-            return_complex=True,
-            center=True
-        )
-    
-    def spectral_convergence_loss(self, x_mag, y_mag):
-        """Spectral convergence loss."""
-        return torch.norm(y_mag - x_mag, p='fro') / torch.norm(x_mag, p='fro')
-    
-    def log_magnitude_loss(self, x_mag, y_mag, eps=1e-7):
-        """Log magnitude loss."""
-        return F.l1_loss(torch.log(x_mag + eps), torch.log(y_mag + eps))
-    
-    def forward(self, x, y):
+        # Default hop and win lengths if not provided
+        if hop_lengths is None:
+            hop_lengths = [f // 4 for f in n_ffts]
+        if win_lengths is None:
+            win_lengths = n_ffts
+            
+        assert len(n_ffts) == len(hop_lengths) == len(win_lengths)
+        
+        self.stft_losses = torch.nn.ModuleList()
+        for fs, ss, wl in zip(n_ffts, hop_lengths, win_lengths):
+            self.stft_losses.append(STFTLosses(fs, ss, wl, window, normalized, epsilon))
+        
+        self.factor_sc = factor_sc
+        self.factor_mag = factor_mag
+        
+    def forward(self, x_real, x_fake):
         """
         Args:
-            x: Real audio [B, T]
-            y: Generated audio [B, T]
+            x_real: Target audio [B, T] or [B, C, T]
+            x_fake: Generated audio [B, T] or [B, C, T]
+        Returns:
+            Multi-resolution STFT loss (spectral convergence + log magnitude)
         """
-        if x.dim() > 2:
-            x = x.squeeze(1)  # Remove channel dim if present
-        if y.dim() > 2:
-            y = y.squeeze(1)
+        # Handle different input dimensions
+        if x_real.dim() == 3 and x_real.shape[1] > 1:  # Multi-channel audio [B, C, T]
+            # Process each channel separately and average the losses
+            batch_size, num_channels, seq_len = x_real.shape
             
-        total_loss = 0.0
-        
-        for fft_size, hop_length, win_length in zip(self.fft_sizes, self.hop_lengths, self.win_lengths):
-            x_stft = self.stft(x, fft_size, hop_length, win_length)
-            y_stft = self.stft(y, fft_size, hop_length, win_length)
+            sc_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
+            mag_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
             
-            x_mag = torch.abs(x_stft)
-            y_mag = torch.abs(y_stft)
+            # Loop through each channel
+            for c in range(num_channels):
+                x_real_ch = x_real[:, c:c+1, :]  # [B, 1, T] - keep channel dimension
+                x_fake_ch = x_fake[:, c:c+1, :]  # [B, 1, T] - keep channel dimension
+                
+                # Compute STFT losses for this channel
+                for stft_loss in self.stft_losses:
+                    sc_l, mag_l = stft_loss(x_real_ch, x_fake_ch)
+                    sc_loss += sc_l
+                    mag_loss += mag_l
             
-            sc_loss = self.spectral_convergence_loss(x_mag, y_mag)
-            mag_loss = self.log_magnitude_loss(x_mag, y_mag)
+            # Average over channels and STFT scales
+            sc_loss /= (num_channels * len(self.stft_losses))
+            mag_loss /= (num_channels * len(self.stft_losses))
             
-            total_loss += self.alpha * sc_loss + self.beta * mag_loss
+        else:
+            # Single channel or 2D input
+            if x_real.dim() == 3:
+                # Single channel [B, 1, T] - already correct format
+                pass
+            elif x_real.dim() == 2:
+                # Add channel dimension [B, T] -> [B, 1, T]
+                x_real = x_real.unsqueeze(1)
+                x_fake = x_fake.unsqueeze(1)
+            elif x_real.dim() > 3:
+                # Flatten extra dimensions
+                x_real = x_real.view(x_real.shape[0], 1, -1)
+                x_fake = x_fake.view(x_fake.shape[0], 1, -1)
+                
+            sc_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
+            mag_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
             
-        return total_loss / len(self.fft_sizes)
+            for stft_loss in self.stft_losses:
+                sc_l, mag_l = stft_loss(x_real, x_fake)
+                sc_loss += sc_l
+                mag_loss += mag_l
+                
+            sc_loss /= len(self.stft_losses)
+            mag_loss /= len(self.stft_losses)
 
-
-class FeatureMatchingLoss(nn.Module):
-    """Feature matching loss for discriminator features."""
-    
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, real_features, fake_features):
-        """
-        Args:
-            real_features: List of feature maps from discriminator on real data
-            fake_features: List of feature maps from discriminator on fake data
-        """
-        loss = 0.0
-        for real_feat, fake_feat in zip(real_features, fake_features):
-            loss += F.l1_loss(fake_feat, real_feat.detach())
-        return loss / len(real_features)
+        return self.factor_sc * sc_loss + self.factor_mag * mag_loss
 
 
 class SoundStreamLoss(nn.Module):
     """
-    SoundStream loss function combining multiple loss components:
-    - Reconstruction loss (time domain)
-    - Spectral loss (frequency domain) 
-    - Adversarial loss (generator)
-    - Feature matching loss
-    - Commitment loss (for VQ)
+    SoundStream neural audio codec loss function.
+    
+    Implements the loss components from SoundStream paper:
+    1. Reconstruction Loss (Multi-resolution STFT loss) - Eq. (2)
+    2. Adversarial Loss (Generator hinge loss) - Eq. (3) 
+    3. Feature Matching Loss - Eq. (4)
+    4. Commitment Loss (VQ regularization)
+    
+    Total loss: L = λ_rec * L_rec + λ_adv * L_adv + λ_fm * L_fm + λ_commit * L_commit
     """
     
     def __init__(self, 
-                 lambda_rec=1.0,
-                 lambda_spec=1.0, 
-                 lambda_adv=1.0,
-                 lambda_feat=1.0,
-                 lambda_commit=0.02,
-                 use_spectral_loss=True,
-                 use_feature_matching=True):
+                 lambda_rec=1.0,      # Reconstruction loss weight
+                 lambda_adv=1.0,      # Adversarial loss weight  
+                 lambda_fm=100.0,     # Feature matching loss weight
+                 lambda_commit=0.02,  # Commitment loss weight
+                 n_ffts: tp.Sequence[int] = [2048, 1024, 512, 256, 128],
+                 hop_lengths: tp.Optional[tp.Sequence[int]] = None,
+                 win_lengths: tp.Optional[tp.Sequence[int]] = None,
+                 factor_sc: float = 0.1,
+                 factor_mag: float = 0.1):
         super().__init__()
         
         # Loss weights
         self.lambda_rec = lambda_rec
-        self.lambda_spec = lambda_spec
         self.lambda_adv = lambda_adv
-        self.lambda_feat = lambda_feat
+        self.lambda_fm = lambda_fm
         self.lambda_commit = lambda_commit
         
-        # Loss components
-        self.reconstruction_loss = nn.L1Loss()
-        self.spectral_loss = SpectralLoss() if use_spectral_loss else None
-        self.feature_matching_loss = FeatureMatchingLoss() if use_feature_matching else None
-        
-        self.use_spectral_loss = use_spectral_loss
-        self.use_feature_matching = use_feature_matching
+        # Loss components - using the new multi-resolution STFT loss
+        self.stft_loss = STFTLoss(
+            n_ffts=n_ffts,
+            hop_lengths=hop_lengths,
+            win_lengths=win_lengths,
+            factor_sc=factor_sc,
+            factor_mag=factor_mag
+        )
     
-    def generator_loss(self, discriminator_outputs):
-        """Compute generator adversarial loss."""
-        adv_loss = 0.0
-        for disc_output in discriminator_outputs:
-            if isinstance(disc_output, dict):
-                # Multiple discriminators
-                for key, output in disc_output.items():
-                    # Use the final output (last element in feature list)
-                    final_output = output[-1] if isinstance(output, list) else output
-                    adv_loss += hinge_gen_loss(final_output)
-            else:
-                # Single discriminator output
-                final_output = disc_output[-1] if isinstance(disc_output, list) else disc_output
-                adv_loss += hinge_gen_loss(final_output)
-        return adv_loss
+    def reconstruction_loss(self, x_real, x_fake):
+        """
+        Multi-resolution STFT reconstruction loss (Eq. 2 in SoundStream paper).
+        
+        L_rec = Σ_s [α * SC_s(x, x̂) + β * LM_s(x, x̂)]
+        
+        Where:
+        - SC_s: Spectral convergence loss at scale s
+        - LM_s: Log magnitude loss at scale s
+        - α, β: Weighting factors for spectral convergence and log magnitude
+        
+        Args:
+            x_real: Ground truth audio [B, C, T] or [B, T]
+            x_fake: Reconstructed audio [B, C, T] or [B, T]
+        """
+        return self.stft_loss(x_real, x_fake)
+    
+    def adversarial_loss(self, disc_fake_outputs):
+        """
+        Generator adversarial loss (Eq. 3 in SoundStream paper).
+        
+        L_adv = -D(x̂)  (for single STFT discriminator)
+        
+        Args:
+            disc_fake_outputs: STFT discriminator outputs on fake data (list of features)
+        """
+        if isinstance(disc_fake_outputs, list) and len(disc_fake_outputs) > 0:
+            # STFT discriminator returns list of features, final element is the score
+            final_score = disc_fake_outputs[-1]
+            return hinge_generator_loss(final_score)
+        else:
+            # Direct discriminator score
+            return hinge_generator_loss(disc_fake_outputs)
+    
+    def feature_matching_loss(self, disc_real_outputs, disc_fake_outputs):
+        """
+        Feature matching loss (Eq. 4 in SoundStream paper).
+        
+        L_fm = Σ_i ||D^(i)(x) - D^(i)(x̂)||_1  (for single STFT discriminator)
+        
+        Args:
+            disc_real_outputs: STFT discriminator features on real data (list)
+            disc_fake_outputs: STFT discriminator features on fake data (list)
+        """
+        if not isinstance(disc_real_outputs, list) or not isinstance(disc_fake_outputs, list):
+            return torch.tensor(0.0, device=disc_real_outputs.device if hasattr(disc_real_outputs, 'device') else 'cpu')
+        
+        fm_loss = 0.0
+        # Exclude final layer (discriminator score) from feature matching
+        for real_feat, fake_feat in zip(disc_real_outputs[:-1], disc_fake_outputs[:-1]):
+            fm_loss += F.l1_loss(fake_feat, real_feat.detach())
+        
+        # Average over number of feature layers
+        num_layers = len(disc_real_outputs) - 1
+        return fm_loss / max(num_layers, 1)
     
     def commitment_loss(self, quantized, encodings):
-        """VQ commitment loss."""
+        """
+        Vector quantization commitment loss.
+        
+        L_commit = ||sg[z_e] - e||²₂
+        
+        Args:
+            quantized: Quantized vectors from VQ
+            encodings: Original encoder outputs before quantization
+        """
         if quantized is None or encodings is None:
             return torch.tensor(0.0, device=quantized.device if quantized is not None else 'cpu')
+        
+        # Stop gradient on quantized vectors (sg[z_e])
         return F.mse_loss(quantized.detach(), encodings)
     
     def forward(self, 
-                real_audio, 
-                fake_audio, 
-                discriminator_real_outputs=None,
-                discriminator_fake_outputs=None,
+                x_real, 
+                x_fake, 
+                disc_real_outputs=None,
+                disc_fake_outputs=None, 
                 quantized=None,
-                encodings=None,
-                mode='generator'):
+                encodings=None):
         """
+        Compute total generator loss.
+        
         Args:
-            real_audio: Original audio [B, C, T] or [B, T]
-            fake_audio: Reconstructed audio [B, C, T] or [B, T]
-            discriminator_real_outputs: Discriminator outputs on real audio
-            discriminator_fake_outputs: Discriminator outputs on fake audio
+            x_real: Ground truth audio [B, C, T] or [B, T]
+            x_fake: Reconstructed audio [B, C, T] or [B, T] 
+            disc_real_outputs: Discriminator outputs/features on real audio
+            disc_fake_outputs: Discriminator outputs/features on fake audio
             quantized: Quantized representations from VQ
             encodings: Original encodings before quantization
-            mode: 'generator' or 'discriminator'
+            
+        Returns:
+            total_loss: Weighted sum of all loss components
+            loss_dict: Dictionary with individual loss values
         """
         losses = {}
-        total_loss = 0.0
         
-        # Ensure audio tensors have the right shape for loss computation
-        if real_audio.dim() == 3 and real_audio.shape[1] == 4:
-            # Convert from [B, 4, T] to [B, T] by taking mean across channels
-            real_audio_for_loss = real_audio.mean(dim=1)
-            fake_audio_for_loss = fake_audio.mean(dim=1)
-        else:
-            real_audio_for_loss = real_audio.squeeze(1) if real_audio.dim() == 3 else real_audio
-            fake_audio_for_loss = fake_audio.squeeze(1) if fake_audio.dim() == 3 else fake_audio
+        # 1. Reconstruction Loss (STFT domain)
+        rec_loss = self.reconstruction_loss(x_real, x_fake)
+        losses['reconstruction'] = rec_loss
         
-        if mode == 'generator':
-            # 1. Reconstruction Loss (Time Domain)
-            rec_loss = self.reconstruction_loss(fake_audio, real_audio)
-            losses['reconstruction'] = rec_loss
-            total_loss += self.lambda_rec * rec_loss
-            
-            # 2. Spectral Loss (Frequency Domain)
-            if self.use_spectral_loss and self.spectral_loss is not None:
-                spec_loss = self.spectral_loss(real_audio_for_loss, fake_audio_for_loss)
-                losses['spectral'] = spec_loss
-                total_loss += self.lambda_spec * spec_loss
-            
-            # 3. Adversarial Loss
-            if discriminator_fake_outputs is not None:
-                adv_loss = self.generator_loss(discriminator_fake_outputs)
-                losses['adversarial'] = adv_loss
-                total_loss += self.lambda_adv * adv_loss
-            
-            # 4. Feature Matching Loss
-            if (self.use_feature_matching and 
-                self.feature_matching_loss is not None and 
-                discriminator_real_outputs is not None and 
-                discriminator_fake_outputs is not None):
-                
-                feat_loss = 0.0
-                # Handle multiple discriminators
-                if isinstance(discriminator_real_outputs, dict):
-                    for key in discriminator_real_outputs.keys():
-                        if key in discriminator_fake_outputs:
-                            real_feats = discriminator_real_outputs[key]
-                            fake_feats = discriminator_fake_outputs[key]
-                            feat_loss += self.feature_matching_loss(real_feats, fake_feats)
-                elif isinstance(discriminator_real_outputs, list):
-                    feat_loss = self.feature_matching_loss(discriminator_real_outputs, discriminator_fake_outputs)
-                
-                losses['feature_matching'] = feat_loss
-                total_loss += self.lambda_feat * feat_loss
-            
-            # 5. Commitment Loss (VQ)
-            if quantized is not None and encodings is not None:
-                commit_loss = self.commitment_loss(quantized, encodings)
-                losses['commitment'] = commit_loss
-                total_loss += self.lambda_commit * commit_loss
+        # 2. Adversarial Loss
+        adv_loss = torch.tensor(0.0, device=x_real.device)
+        if disc_fake_outputs is not None:
+            adv_loss = self.adversarial_loss(disc_fake_outputs)
+        losses['adversarial'] = adv_loss
         
-        elif mode == 'discriminator':
-            # Discriminator loss is handled separately in the training loop
-            pass
+        # 3. Feature Matching Loss
+        fm_loss = torch.tensor(0.0, device=x_real.device)
+        if disc_real_outputs is not None and disc_fake_outputs is not None:
+            fm_loss = self.feature_matching_loss(disc_real_outputs, disc_fake_outputs)
+        losses['feature_matching'] = fm_loss
+        
+        # 4. Commitment Loss
+        commit_loss = self.commitment_loss(quantized, encodings)
+        losses['commitment'] = commit_loss
+        
+        # Total weighted loss
+        total_loss = (self.lambda_rec * rec_loss + 
+                     self.lambda_adv * adv_loss +
+                     self.lambda_fm * fm_loss + 
+                     self.lambda_commit * commit_loss)
         
         losses['total'] = total_loss
         return total_loss, losses
 
 
+class DiscriminatorLoss(nn.Module):
+    """
+    Discriminator loss for SoundStream training with single STFT discriminator.
+    
+    Implements hinge loss for discriminator training:
+    L_D = max(0, 1 - D(x)) + max(0, 1 + D(x̂))
+    """
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, disc_real_outputs, disc_fake_outputs):
+        """
+        Compute discriminator loss for single STFT discriminator.
+        
+        Args:
+            disc_real_outputs: STFT discriminator outputs on real audio (list of features)
+            disc_fake_outputs: STFT discriminator outputs on fake audio (list of features)
+            
+        Returns:
+            Total discriminator loss
+        """
+        # Extract final discriminator scores (last element in feature list)
+        if isinstance(disc_real_outputs, list) and len(disc_real_outputs) > 0:
+            real_score = disc_real_outputs[-1]
+        else:
+            real_score = disc_real_outputs
+            
+        if isinstance(disc_fake_outputs, list) and len(disc_fake_outputs) > 0:
+            fake_score = disc_fake_outputs[-1]
+        else:
+            fake_score = disc_fake_outputs
+        
+        # Compute hinge loss
+        real_loss = hinge_discriminator_real_loss(real_score)
+        fake_loss = hinge_discriminator_fake_loss(fake_score)
+        
+        return real_loss + fake_loss
+
+
 def soundstream_loss(**kwargs):
-    """Factory function for SoundStream loss."""
+    """Factory function for SoundStream generator loss.
+    
+    Args:
+        **kwargs: Parameters for SoundStreamLoss including:
+            - lambda_rec, lambda_adv, lambda_fm, lambda_commit: Loss weights
+            - n_ffts, hop_lengths, win_lengths: STFT parameters
+            - factor_sc, factor_mag: Spectral loss weighting factors
+    """ 
     return SoundStreamLoss(**kwargs)
+
+
+def discriminator_loss():
+    """Factory function for SoundStream discriminator loss."""
+    return DiscriminatorLoss()

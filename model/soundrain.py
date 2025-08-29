@@ -336,7 +336,7 @@ class STFTDiscriminator(nn.Module):
 
     def forward(self, x):
         feature_map = []
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x)
             feature_map.append(x)
         return feature_map

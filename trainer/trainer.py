@@ -6,8 +6,8 @@ import torch
 import wandb
 
 from trainer.base_trainer import BaseTrainer
-from model.soundrain import WaveDiscriminator, STFTDiscriminator
-from model.loss import hinge_discr_loss
+from model.soundrain import STFTDiscriminator
+from model.loss import DiscriminatorLoss
 plt.switch_backend('agg')
 
 
@@ -31,17 +31,13 @@ class Trainer(BaseTrainer):
         
         if self.use_discriminators:
             self._setup_discriminators(config)
+            # Initialize discriminator loss function
+            self.discriminator_loss_fn = DiscriminatorLoss()
     
     def _setup_discriminators(self, config):
         """Setup discriminators and their optimizers."""
         # Get discriminator config or use defaults
         disc_config = config.get("discriminator", {})
-        
-        # Wave discriminator
-        self.wave_discriminator = WaveDiscriminator(
-            num_D=disc_config.get("wave_num_D", 3),
-            downsampling_factor=disc_config.get("wave_downsample_factor", 2)
-        ).to(self.device)
         
         # STFT discriminator  
         self.stft_discriminator = STFTDiscriminator(
@@ -51,18 +47,11 @@ class Trainer(BaseTrainer):
         
         # Multi-GPU support
         if self.n_gpu > 1:
-            self.wave_discriminator = torch.nn.DataParallel(self.wave_discriminator, device_ids=list(range(self.n_gpu)))
             self.stft_discriminator = torch.nn.DataParallel(self.stft_discriminator, device_ids=list(range(self.n_gpu)))
         
-        # Discriminator optimizers
+        # Discriminator optimizer
         disc_lr = config.get("discriminator_optimizer", {}).get("lr", 2e-4)
         disc_betas = config.get("discriminator_optimizer", {}).get("betas", (0.5, 0.9))
-        
-        self.wave_disc_optimizer = torch.optim.Adam(
-            self.wave_discriminator.parameters(), 
-            lr=disc_lr, 
-            betas=disc_betas
-        )
         
         self.stft_disc_optimizer = torch.optim.Adam(
             self.stft_discriminator.parameters(), 
@@ -97,28 +86,8 @@ class Trainer(BaseTrainer):
     
     def _discriminator_step(self, real_audio, fake_audio):
         """Perform discriminator training step."""
-        self.wave_disc_optimizer.zero_grad()
         self.stft_disc_optimizer.zero_grad()
-        
-        # Convert multi-channel audio for discriminators
-        if real_audio.dim() == 3 and real_audio.shape[1] == 4:
-            # Take mean across channels for wave discriminator
-            real_wave = real_audio.mean(dim=1, keepdim=True)  # [B, 1, T]
-            fake_wave = fake_audio.mean(dim=1, keepdim=True)
-        else:
-            real_wave = real_audio
-            fake_wave = fake_audio
-        
-        # Wave discriminator
-        real_wave_outputs = self.wave_discriminator(real_wave)
-        fake_wave_outputs = self.wave_discriminator(fake_wave.detach())
-        
-        wave_disc_loss = 0.0
-        for key in real_wave_outputs.keys():
-            real_output = real_wave_outputs[key][-1]  # Final layer output
-            fake_output = fake_wave_outputs[key][-1]
-            wave_disc_loss += hinge_discr_loss(fake_output, real_output)
-        
+
         # STFT discriminator
         real_stft = self._compute_stft(real_audio)
         fake_stft = self._compute_stft(fake_audio.detach())
@@ -126,18 +95,18 @@ class Trainer(BaseTrainer):
         real_stft_outputs = self.stft_discriminator(real_stft)
         fake_stft_outputs = self.stft_discriminator(fake_stft)
         
-        stft_disc_loss = hinge_discr_loss(fake_stft_outputs[-1], real_stft_outputs[-1])
+        # Combine discriminator outputs for loss computation (only STFT now)
+        disc_real_outputs = real_stft_outputs
+        disc_fake_outputs = fake_stft_outputs
         
-        # Total discriminator loss
-        total_disc_loss = wave_disc_loss + stft_disc_loss
+        # Compute discriminator loss using the DiscriminatorLoss class
+        total_disc_loss = self.discriminator_loss_fn(disc_real_outputs, disc_fake_outputs)
+        
         total_disc_loss.backward()
-        
-        self.wave_disc_optimizer.step()
         self.stft_disc_optimizer.step()
         
         return {
-            'wave_disc_loss': wave_disc_loss.item(),
-            'stft_disc_loss': stft_disc_loss.item(),
+            'stft_disc_loss': total_disc_loss.item(),
             'total_disc_loss': total_disc_loss.item()
         }
     
@@ -146,34 +115,17 @@ class Trainer(BaseTrainer):
         if not self.use_discriminators:
             return {}, {}, {}
         
-        # Convert multi-channel audio for discriminators
-        if real_audio.dim() == 3 and real_audio.shape[1] == 4:
-            real_wave = real_audio.mean(dim=1, keepdim=True)
-            fake_wave = fake_audio.mean(dim=1, keepdim=True)
-        else:
-            real_wave = real_audio
-            fake_wave = fake_audio
-        
-        # Get discriminator outputs for generator training
+        # Get discriminator outputs for generator training (only STFT)
         with torch.no_grad():
-            real_wave_outputs = self.wave_discriminator(real_wave)
             real_stft = self._compute_stft(real_audio)
             real_stft_outputs = self.stft_discriminator(real_stft)
         
-        fake_wave_outputs = self.wave_discriminator(fake_wave)
         fake_stft = self._compute_stft(fake_audio)
         fake_stft_outputs = self.stft_discriminator(fake_stft)
         
-        # Combine discriminator outputs
-        discriminator_real_outputs = {
-            'wave': real_wave_outputs,
-            'stft': real_stft_outputs
-        }
-        
-        discriminator_fake_outputs = {
-            'wave': fake_wave_outputs,
-            'stft': fake_stft_outputs
-        }
+        # Return discriminator outputs (only STFT now)
+        discriminator_real_outputs = real_stft_outputs
+        discriminator_fake_outputs = fake_stft_outputs
         
         return discriminator_real_outputs, discriminator_fake_outputs, {}
 
@@ -198,21 +150,14 @@ class Trainer(BaseTrainer):
             else:
                 disc_real_outputs, disc_fake_outputs = None, None
             
-            # Compute generator loss
-            if hasattr(self.loss_function, 'forward'):
-                # SoundStream loss
-                gen_loss, loss_components = self.loss_function(
-                    real_audio=audio_sig,
-                    fake_audio=reconstructed,
-                    discriminator_real_outputs=disc_real_outputs,
-                    discriminator_fake_outputs=disc_fake_outputs,
-                    mode='generator'
-                )
-            else:
-                # Legacy loss function
-                gen_loss = self.loss_function(audio_sig, reconstructed)
-                loss_components = {'reconstruction': gen_loss}
-            
+            # Compute generator loss using SoundStream loss
+            gen_loss, loss_components = self.loss_function(
+                x_real=audio_sig,
+                x_fake=reconstructed,
+                disc_real_outputs=disc_real_outputs,
+                disc_fake_outputs=disc_fake_outputs
+            )
+
             gen_loss.backward()
             self.optimizer.step()
             
@@ -288,11 +233,10 @@ class Trainer(BaseTrainer):
                 if hasattr(self.loss_function, 'forward'):
                     # SoundStream loss (without discriminator in validation)
                     chunk_loss, _ = self.loss_function(
-                        real_audio=clean_chunk,
-                        fake_audio=enhanced_chunk,
-                        discriminator_real_outputs=None,
-                        discriminator_fake_outputs=None,
-                        mode='generator'
+                        x_real=clean_chunk,
+                        x_fake=enhanced_chunk,
+                        disc_real_outputs=None,
+                        disc_fake_outputs=None
                     )
                 else:
                     # Legacy loss function
@@ -337,14 +281,11 @@ class Trainer(BaseTrainer):
         
         # Save discriminator states if they exist
         if self.use_discriminators:
-            if isinstance(self.wave_discriminator, torch.nn.DataParallel):
-                state_dict["wave_discriminator"] = self.wave_discriminator.module.cpu().state_dict()
+            if isinstance(self.stft_discriminator, torch.nn.DataParallel):
                 state_dict["stft_discriminator"] = self.stft_discriminator.module.cpu().state_dict()
             else:
-                state_dict["wave_discriminator"] = self.wave_discriminator.cpu().state_dict()
                 state_dict["stft_discriminator"] = self.stft_discriminator.cpu().state_dict()
             
-            state_dict["wave_disc_optimizer"] = self.wave_disc_optimizer.state_dict()
             state_dict["stft_disc_optimizer"] = self.stft_disc_optimizer.state_dict()
 
         torch.save(state_dict, (self.checkpoints_dir / "latest_model.tar").as_posix())
@@ -356,7 +297,6 @@ class Trainer(BaseTrainer):
         # Move models back to device
         self.model.to(self.device)
         if self.use_discriminators:
-            self.wave_discriminator.to(self.device)
             self.stft_discriminator.to(self.device)
     
     def _resume_checkpoint(self):
@@ -376,15 +316,12 @@ class Trainer(BaseTrainer):
             self.model.load_state_dict(checkpoint["model"])
         
         # Load discriminator states if they exist
-        if self.use_discriminators and "wave_discriminator" in checkpoint:
-            if isinstance(self.wave_discriminator, torch.nn.DataParallel):
-                self.wave_discriminator.module.load_state_dict(checkpoint["wave_discriminator"])
+        if self.use_discriminators and "stft_discriminator" in checkpoint:
+            if isinstance(self.stft_discriminator, torch.nn.DataParallel):
                 self.stft_discriminator.module.load_state_dict(checkpoint["stft_discriminator"])
             else:
-                self.wave_discriminator.load_state_dict(checkpoint["wave_discriminator"])
                 self.stft_discriminator.load_state_dict(checkpoint["stft_discriminator"])
             
-            self.wave_disc_optimizer.load_state_dict(checkpoint["wave_disc_optimizer"])
             self.stft_disc_optimizer.load_state_dict(checkpoint["stft_disc_optimizer"])
 
         print(f"Model checkpoint loaded. Training will begin in {self.start_epoch} epoch.")
@@ -393,12 +330,10 @@ class Trainer(BaseTrainer):
         """Override to set discriminators to train mode."""
         self.model.train()
         if self.use_discriminators:
-            self.wave_discriminator.train()
             self.stft_discriminator.train()
 
     def _set_models_to_eval_mode(self):
         """Override to set discriminators to eval mode."""
         self.model.eval()
         if self.use_discriminators:
-            self.wave_discriminator.eval()
             self.stft_discriminator.eval()
