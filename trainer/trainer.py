@@ -33,6 +33,8 @@ class Trainer(BaseTrainer):
             self._setup_discriminators(config)
             # Initialize discriminator loss function
             self.discriminator_loss_fn = DiscriminatorLoss()
+            # Set discriminator training frequency from config
+            self.disc_train_freq = config.get("discriminator_train_freq", 1)
     
     def _setup_discriminators(self, config):
         """Setup discriminators and their optimizers."""
@@ -59,6 +61,7 @@ class Trainer(BaseTrainer):
             betas=disc_betas
         )
     
+    # TODO: make this multi-channel
     def _compute_stft(self, audio, n_fft=1024, hop_length=256, win_length=1024):
         """Compute STFT for STFT discriminator."""
         # Convert audio to proper format for STFT
@@ -75,12 +78,12 @@ class Trainer(BaseTrainer):
             center=True
         )
         
-        # Convert to magnitude and phase
-        magnitude = torch.abs(stft).unsqueeze(1)  # Add channel dimension
-        phase = torch.angle(stft).unsqueeze(1)
+        # Extract real and imaginary components
+        real_part = stft.real.unsqueeze(1)  # Add channel dimension
+        imag_part = stft.imag.unsqueeze(1)  # Add channel dimension
         
-        # Concatenate magnitude and phase
-        stft_features = torch.cat([magnitude, phase], dim=1)  # [B, 2, F, T]
+        # Concatenate real and imaginary parts
+        stft_features = torch.cat([real_part, imag_part], dim=1)  # [B, 2, F, T]
         
         return stft_features
     
@@ -115,15 +118,17 @@ class Trainer(BaseTrainer):
         if not self.use_discriminators:
             return {}, {}, {}
         
-        # Get discriminator outputs for generator training (only STFT)
+        # Get discriminator outputs for generator training
+        # Real outputs: no gradients needed (only used for feature matching)
         with torch.no_grad():
             real_stft = self._compute_stft(real_audio)
             real_stft_outputs = self.stft_discriminator(real_stft)
         
+        # Fake outputs: gradients needed for adversarial loss
         fake_stft = self._compute_stft(fake_audio)
         fake_stft_outputs = self.stft_discriminator(fake_stft)
         
-        # Return discriminator outputs (only STFT now)
+        # return discriminator outputs
         discriminator_real_outputs = real_stft_outputs
         discriminator_fake_outputs = fake_stft_outputs
         
