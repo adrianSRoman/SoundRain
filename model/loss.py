@@ -34,7 +34,7 @@ def hinge_discriminator_fake_loss(fake_outputs):
 # Generator hinge loss  
 def hinge_generator_loss(fake_outputs):
     """Hinge loss for generator: -fake"""
-    return -fake_outputs.mean()
+    return F.relu(1.0 - fake_outputs).mean()
 
 
 def leaky_relu(p=0.1):
@@ -298,7 +298,7 @@ class SoundStreamLoss(nn.Module):
     
     def reconstruction_loss(self, x_real, x_fake):
         """
-        Multi-resolution STFT reconstruction loss (Eq. 2 in SoundStream paper).
+        Multi-resolution STFT reconstruction loss (Eq. 4 and 5 in SoundStream paper).
         
         L_rec = Σ_s [α * SC_s(x, x̂) + β * LM_s(x, x̂)]
         
@@ -315,7 +315,7 @@ class SoundStreamLoss(nn.Module):
     
     def adversarial_loss(self, disc_fake_outputs):
         """
-        Generator adversarial loss (Eq. 3 in SoundStream paper).
+        Generator adversarial loss (Eq. 2 in SoundStream paper).
         
         L_adv = -D(x̂)  (for single STFT discriminator)
         
@@ -332,7 +332,7 @@ class SoundStreamLoss(nn.Module):
     
     def feature_matching_loss(self, disc_real_outputs, disc_fake_outputs):
         """
-        Feature matching loss (Eq. 4 in SoundStream paper).
+        Feature matching loss (Eq. 3 in SoundStream paper).
         
         L_fm = Σ_i ||D^(i)(x) - D^(i)(x̂)||_1  (for single STFT discriminator)
         
@@ -347,7 +347,6 @@ class SoundStreamLoss(nn.Module):
         # Exclude final layer (discriminator score) from feature matching
         for real_feat, fake_feat in zip(disc_real_outputs[:-1], disc_fake_outputs[:-1]):
             fm_loss += F.l1_loss(fake_feat, real_feat.detach())
-        
         # Average over number of feature layers
         num_layers = len(disc_real_outputs) - 1
         return fm_loss / max(num_layers, 1)

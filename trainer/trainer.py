@@ -98,7 +98,7 @@ class Trainer(BaseTrainer):
         real_stft_outputs = self.stft_discriminator(real_stft)
         fake_stft_outputs = self.stft_discriminator(fake_stft)
         
-        # Combine discriminator outputs for loss computation (only STFT now)
+        # Combine discriminator outputs for loss computation
         disc_real_outputs = real_stft_outputs
         disc_fake_outputs = fake_stft_outputs
         
