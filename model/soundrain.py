@@ -286,12 +286,11 @@ class ResidualUnit2d(nn.Module):
 
 
 class STFTDiscriminator(nn.Module):
-    def __init__(self, C, F_bins):
+    def __init__(self, C, F_bins, n_channels=4):
         super().__init__()
-
         self.layers = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(in_channels=2, out_channels=32, kernel_size=(7, 7)),
+                nn.Conv2d(in_channels=2 * n_channels, out_channels=32, kernel_size=(7, 7)),
                 nn.ELU()
             ),
             nn.Sequential(

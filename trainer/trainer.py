@@ -61,30 +61,31 @@ class Trainer(BaseTrainer):
             betas=disc_betas
         )
     
-    # TODO: make this multi-channel
     def _compute_stft(self, audio, n_fft=1024, hop_length=256, win_length=1024):
         """Compute STFT for STFT discriminator."""
-        # Convert audio to proper format for STFT
-        if audio.dim() == 3 and audio.shape[1] == 4:
-            # Take first channel or mean across channels
-            audio = audio[:, 0, :]  # Take first channel
-            
+         # Ensure audio has channel dimension
+        if audio.dim() == 2:  # [B, T]
+            audio = audio.unsqueeze(1)  # -> [B, 1, T]
+
+        B, C, T = audio.shape
+
+        # Compute STFT channel-wise
         stft = torch.stft(
-            audio, 
-            n_fft=n_fft, 
-            hop_length=hop_length, 
+            audio.view(-1, T),     # [B*C, T]
+            n_fft=n_fft,
+            hop_length=hop_length,
             win_length=win_length,
+            window=torch.hann_window(win_length).to(audio.device),
+            normalized=False,
             return_complex=True,
-            center=True
-        )
-        
-        # Extract real and imaginary components
-        real_part = stft.real.unsqueeze(1)  # Add channel dimension
-        imag_part = stft.imag.unsqueeze(1)  # Add channel dimension
-        
-        # Concatenate real and imaginary parts
-        stft_features = torch.cat([real_part, imag_part], dim=1)  # [B, 2, F, T]
-        
+        )  # -> [B*C, F, T]
+
+        # Reshape back to [B, C, F, T]
+        stft = stft.view(B, C, stft.size(-2), stft.size(-1))
+
+        # Separate real/imag as extra dim instead of concatenating
+        stft_features = torch.cat([stft.real, stft.imag], dim=1)  # -> [B, C * 2, F, T]
+
         return stft_features
     
     def _discriminator_step(self, real_audio, fake_audio):
