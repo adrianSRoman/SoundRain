@@ -179,13 +179,22 @@ class Trainer(BaseTrainer):
 
             loss_total += gen_loss.item()
             
-            # Log detailed losses
+            # Log detailed losses including balancer metrics
             if i % 100 == 0 and hasattr(self.loss_function, 'forward'):
                 for key, value in loss_components.items():
                     if torch.is_tensor(value):
                         wandb.log({f"Loss/train_{key}": value.item()}, step=epoch * len(self.train_data_loader) + i)
                     else:
                         wandb.log({f"Loss/train_{key}": value}, step=epoch * len(self.train_data_loader) + i)
+                
+                # Log balancer gradient ratios if available
+                if hasattr(self.loss_function, 'balancer') and hasattr(self.loss_function.balancer, 'metrics'):
+                    balancer_metrics = self.loss_function.balancer.metrics
+                    for key, value in balancer_metrics.items():
+                        if torch.is_tensor(value):
+                            wandb.log({f"Balancer/{key}": value.item()}, step=epoch * len(self.train_data_loader) + i)
+                        else:
+                            wandb.log({f"Balancer/{key}": value}, step=epoch * len(self.train_data_loader) + i)
             
             if i % 100 == 0:
                 print(f"Batch {i}, Generator Loss: {gen_loss.item():.6f}")
