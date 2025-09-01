@@ -366,7 +366,7 @@ class SoundStreamLoss(nn.Module):
         fm_loss = 0.0
         # Exclude final layer (discriminator score) from feature matching
         for real_feat, fake_feat in zip(disc_real_outputs[:-1], disc_fake_outputs[:-1]):
-            fm_loss += F.l1_loss(fake_feat, real_feat.detach())
+            fm_loss += F.l1_loss(fake_feat, real_feat.detach()) / torch.abs(real_feat.detach()).mean()
         # Average over number of feature layers
         num_layers = len(disc_real_outputs) - 1
         return fm_loss / max(num_layers, 1)
