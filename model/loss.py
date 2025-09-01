@@ -8,7 +8,6 @@ import torchaudio
 import typing as tp
 from model.balancer import Balancer
 
-
 def mse_loss():
     return torch.nn.MSELoss()
 
@@ -410,10 +409,6 @@ class SoundStreamLoss(nn.Module):
             total_loss: Weighted sum of all loss components
             loss_dict: Dictionary with individual loss values
         """
-        # Ensure x_fake requires gradients for balancer
-        if not x_fake.requires_grad:
-            x_fake.requires_grad_(True)
-            
         losses = {}
         
         # 1. Reconstruction Loss (STFT domain)
@@ -432,16 +427,17 @@ class SoundStreamLoss(nn.Module):
             fm_loss = self.feature_matching_loss(disc_real_outputs, disc_fake_outputs)
         losses['feature_matching'] = fm_loss
         
-        # 4. Commitment Loss
-        commit_loss = self.commitment_loss(quantized, encodings)
-        losses['commitment'] = commit_loss
+        # # 4. Commitment Loss
+        # commit_loss = self.commitment_loss(quantized, encodings)
+        # print("commitment", commit_loss)
+        # losses['commitment'] = commit_loss
         
         # Apply gradient balancing if enabled
         if self.balance_losses and x_fake.requires_grad:
             # Filter out zero losses to avoid balancer issues
             active_losses = {k: v for k, v in losses.items() 
-                           if k in self.balancer.weights and v.item() > 0}
-            
+                           if k in self.balancer.weights and v.item() >= 0}
+
             if len(active_losses) > 1:  # Only balance if we have multiple active losses
                 # Use balancer for gradient balancing (implements Equation 5)
                 total_loss = self.balancer.backward(active_losses, x_fake)
@@ -453,14 +449,14 @@ class SoundStreamLoss(nn.Module):
                 # Fallback to manual weighting
                 total_loss = (self.lambda_rec * rec_loss + 
                              self.lambda_adv * adv_loss +
-                             self.lambda_fm * fm_loss + 
-                             self.lambda_commit * commit_loss)
+                             self.lambda_fm * fm_loss) #+ 
+                            #  self.lambda_commit * commit_loss)
         else:
             # Manual weighted loss (original approach)
             total_loss = (self.lambda_rec * rec_loss + 
                          self.lambda_adv * adv_loss +
-                         self.lambda_fm * fm_loss + 
-                         self.lambda_commit * commit_loss)
+                         self.lambda_fm * fm_loss) # + 
+                        #  self.lambda_commit * commit_loss)
         
         losses['total'] = total_loss
         return total_loss, losses

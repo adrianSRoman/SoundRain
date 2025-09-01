@@ -41,10 +41,12 @@ class Trainer(BaseTrainer):
         # Get discriminator config or use defaults
         disc_config = config.get("discriminator", {})
         
-        # STFT discriminator  
+        # STFT discriminator with multi-channel support
+        n_channels = disc_config.get("n_channels", 4)  # 4-channel spatial audio
         self.stft_discriminator = STFTDiscriminator(
             C=disc_config.get("stft_C", 32),
-            F_bins=disc_config.get("stft_F_bins", 1024)
+            F_bins=disc_config.get("stft_F_bins", 1024),
+            n_channels=n_channels
         ).to(self.device)
         
         # Multi-GPU support
@@ -149,13 +151,13 @@ class Trainer(BaseTrainer):
             # Generate reconstructed audio
             self.optimizer.zero_grad()
             reconstructed = self.model(audio_sig)
-            
+
             # Get discriminator outputs for loss computation
             if self.use_discriminators:
                 disc_real_outputs, disc_fake_outputs, _ = self._generator_step(audio_sig, reconstructed)
             else:
                 disc_real_outputs, disc_fake_outputs = None, None
-            
+
             # Compute generator loss using SoundStream loss
             gen_loss, loss_components = self.loss_function(
                 x_real=audio_sig,
@@ -164,12 +166,12 @@ class Trainer(BaseTrainer):
                 disc_fake_outputs=disc_fake_outputs
             )
 
-            gen_loss.backward()
+            # gen_loss.backward() # commented since loss balancer is taking care of this
             self.optimizer.step()
             
             # Train discriminators
             if self.use_discriminators and i % disc_train_freq == 0:
-                disc_losses = self._discriminator_step(audio_sig, reconstructed.detach())
+                disc_losses = self._discriminator_step(audio_sig, reconstructed.detach()) # detach to avoid gradients to generator
                 disc_loss_total += disc_losses['total_disc_loss']
                 
                 # Log discriminator losses
