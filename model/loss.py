@@ -411,9 +411,13 @@ class SoundStreamLoss(nn.Module):
         """
         losses = {}
         
-        # 1. Reconstruction Loss (STFT domain)
-        rec_loss = self.reconstruction_loss(x_real, x_fake)
-        losses['reconstruction'] = rec_loss
+        # 1.1 Reconstruction Loss (Time domain)
+        rec_loss_t = l1_loss()(x_real, x_fake)
+        losses['reconstruction_t'] = rec_loss_t
+
+        # 1.2 Reconstruction Loss (STFT domain)
+        rec_loss_f = self.reconstruction_loss(x_real, x_fake)
+        losses['reconstruction_f'] = rec_loss_f
         
         # 2. Adversarial Loss
         adv_loss = torch.tensor(0.0, device=x_real.device)
@@ -447,17 +451,17 @@ class SoundStreamLoss(nn.Module):
                 losses.update({f'balance_{k}': v for k, v in balancer_metrics.items()})
             else:
                 # Fallback to manual weighting
-                total_loss = (self.lambda_rec * rec_loss + 
+                total_loss = (self.lambda_rec * (rec_loss_t + rec_loss_f) + 
                              self.lambda_adv * adv_loss +
                              self.lambda_fm * fm_loss) #+ 
                             #  self.lambda_commit * commit_loss)
         else:
             # Manual weighted loss (original approach)
-            total_loss = (self.lambda_rec * rec_loss + 
+            total_loss = (self.lambda_rec * rec_loss_f + 
                          self.lambda_adv * adv_loss +
                          self.lambda_fm * fm_loss) # + 
                         #  self.lambda_commit * commit_loss)
-        
+
         losses['total'] = total_loss
         return total_loss, losses
 

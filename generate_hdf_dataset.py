@@ -10,7 +10,9 @@ from typing import List, Tuple, Optional
 import logging
 
 from util.utils import get_visibility_matrix
-from scipy.io import wavfile
+
+import soundfile as sf
+import librosa
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -189,17 +191,12 @@ class HDF5DatasetGenerator:
             Tuple of (framed_audio, visibility_matrices, sample_rate)
         """
         try:
-            sample_rate, audio_data = wavfile.read(file_path)
-
-            # resample to 48kHz with scipy
-            if sample_rate != 48000:
-                # Compute up/down factors
-                gcd = np.gcd(sample_rate, 48000)
-                up = 48000 // gcd
-                down = sample_rate // gcd
-                
-                audio_data = resample_poly(audio_data, up, down)
-                sample_rate = 48000
+            audio_data, sample_rate = sf.read(file_path)
+            # resample to 48kHz with librosa
+            if sample_rate != 24000:
+                audio_data = librosa.resample(y=audio_data.T, orig_sr=sample_rate, target_sr=24000).T
+                sample_rate = 24000
+            sf.write(f"./{os.path.basename(file_path)}", audio_data, 24000)
 
             if audio_data.shape[-1] == 32:
                 audio_data = audio_data[:, [5,9,25,21]] # 4 ch raw MIC

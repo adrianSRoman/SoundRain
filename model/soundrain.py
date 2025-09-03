@@ -260,26 +260,26 @@ class ResidualUnit2d(nn.Module):
         self.s_f = s_f
 
         self.layers = nn.Sequential(
-            nn.Conv2d(
+            weight_norm(nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=N,
                 kernel_size=(3, 3),
                 padding="same"
-            ),
+            )),
             nn.ELU(),
-            nn.Conv2d(
+            weight_norm(nn.Conv2d(
                 in_channels=N,
                 out_channels=m*N,
                 kernel_size=(s_f+2, s_t+2),
                 stride=(s_f, s_t)
-            )
+            ))
         )
-        
-        self.skip_connection = nn.Conv2d(
+
+        self.skip_connection = weight_norm(nn.Conv2d(
             in_channels=in_channels,
             out_channels=m*N,
             kernel_size=(1, 1), stride=(s_f, s_t)
-        )
+        ))
 
     def forward(self, x):
         return self.layers(F.pad(x, [self.s_t+1, 0, self.s_f+1, 0])) + self.skip_connection(x)
@@ -290,7 +290,7 @@ class STFTDiscriminator(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(in_channels=2 * n_channels, out_channels=32, kernel_size=(7, 7)),
+                weight_norm(nn.Conv2d(in_channels=2 * n_channels, out_channels=32, kernel_size=(7, 7))),
                 nn.ELU()
             ),
             nn.Sequential(
