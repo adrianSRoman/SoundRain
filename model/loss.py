@@ -256,6 +256,216 @@ class STFTLoss(nn.Module):
         return self.factor_sc * sc_loss + self.factor_mag * mag_loss
 
 
+
+def mel_spectrogram(magnitude_spec: torch.Tensor, n_mels: int = 64, 
+                   sample_rate: int = 24000, n_fft: int = 1024) -> torch.Tensor:
+    """Convert magnitude spectrogram to mel-spectrogram.
+    
+    Args:
+        magnitude_spec: Magnitude spectrogram (B, C, #frames, #freq_bins)
+        n_mels: Number of mel bins
+        sample_rate: Sample rate
+        n_fft: FFT size
+    
+    Returns:
+        torch.Tensor: Mel spectrogram (B, C, #frames, n_mels)
+    """
+    # Create mel filterbank
+    mel_fb = torch.linspace(0, sample_rate // 2, magnitude_spec.shape[-1], device=magnitude_spec.device)
+    
+    # Simple linear mel conversion (NOTE: librosa's mel filterbank?)
+    mel_points = torch.linspace(0, magnitude_spec.shape[-1] - 1, n_mels, device=magnitude_spec.device).long()
+    mel_spec = magnitude_spec[..., mel_points]
+    
+    return mel_spec
+
+
+class SoundStreamSTFTLoss(nn.Module):
+    """Multi-resolution STFT loss following SoundStream paper.
+    
+    Uses mel-spectrograms with multiple time scales and combines L1 and L2 losses
+    as described in equation (1) of the SoundStream paper.
+    """
+    
+    def __init__(self, 
+                 scales: tp.Sequence[int] = (5, 6, 7, 8, 9, 10, 11),  # e = 5,...,11 from paper
+                 n_mels: int = 64,  # 64-bins mel-spectrogram
+                 alpha_coeffs: tp.Optional[tp.Sequence[float]] = None,  # α coefficients
+                 sample_rate: int = 24000,
+                 normalized: bool = True,  # Paper uses normalized STFT
+                 window: str = "hann_window"):
+        super().__init__()
+        
+        self.scales = scales
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+        self.normalized = normalized
+        
+        # α coefficients for balancing L1 and L2 terms (paper uses α_i = 1)
+        if alpha_coeffs is None:
+            alpha_coeffs = [1.0] * len(scales)
+        self.alpha_coeffs = alpha_coeffs
+        
+        # STFT parameters for each scale
+        self.stft_params = []
+        for i, scale in enumerate(scales):
+            window_size = 2 ** scale  # 2^i window size
+            hop_length = window_size // 4  # 2^i / 4 hop length
+            
+            self.stft_params.append({
+                'n_fft': window_size,
+                'hop_length': hop_length,
+                'win_length': window_size,
+            })
+            
+            # Register window buffer for each scale
+            self.register_buffer(f"window_{i}", getattr(torch, window)(window_size))
+    
+    def forward(self, x_real: torch.Tensor, x_fake: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x_real: Target audio [B, T] or [B, C, T]
+            x_fake: Generated audio [B, T] or [B, C, T]
+        Returns:
+            Multi-resolution STFT loss following SoundStream equation (1)
+        """
+        # Handle different input dimensions
+        if x_real.dim() == 2:
+            # Add channel dimension [B, T] -> [B, 1, T]
+            x_real = x_real.unsqueeze(1)
+            x_fake = x_fake.unsqueeze(1)
+        elif x_real.dim() > 3:
+            # Flatten extra dimensions
+            x_real = x_real.view(x_real.shape[0], 1, -1)
+            x_fake = x_fake.view(x_fake.shape[0], 1, -1)
+        
+        total_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
+        
+        # Process each time scale
+        for i, (scale, alpha) in enumerate(zip(self.scales, self.alpha_coeffs)):
+            params = self.stft_params[i]
+            window = getattr(self, f"window_{i}").to(x_real.device)
+            
+            # Compute STFT magnitude spectrograms
+            real_mag = _stft(x_real, params['n_fft'], params['hop_length'],
+                           params['win_length'], window, self.normalized)
+            fake_mag = _stft(x_fake, params['n_fft'], params['hop_length'],
+                           params['win_length'], window, self.normalized)
+            
+            # Convert to mel-spectrograms (64-bins as per paper)
+            real_mel = mel_spectrogram(real_mag, self.n_mels, self.sample_rate, params['n_fft'])
+            fake_mel = mel_spectrogram(fake_mag, self.n_mels, self.sample_rate, params['n_fft'])
+            
+            # Compute L1 and L2 losses for this scale
+            l1_loss = F.l1_loss(fake_mel, real_mel)
+            l2_loss = F.mse_loss(fake_mel, real_mel)  # MSE is L2 loss
+            
+            # Combine according to equation (1): ||S_i(x) - S_i(x̂)||_1 + α_i||S_i(x) - S_i(x̂)||_2
+            scale_loss = l1_loss + alpha * l2_loss
+            total_loss += scale_loss
+        
+        # Normalize by number of scales and alpha coefficients (as per equation 1)
+        total_loss = total_loss / (len(self.scales) * len(self.alpha_coeffs))
+        
+        return total_loss
+
+
+# Alternative implementation with proper mel filterbank (requires torchaudio)
+class SoundStreamSTFTLoss(nn.Module):
+    """Enhanced version using torchaudio's mel filterbank for better mel conversion."""
+    
+    def __init__(self, 
+                 scales: tp.Sequence[int] = (5, 6, 7, 8, 9, 10, 11),
+                 n_mels: int = 64,
+                 alpha_coeffs: tp.Optional[tp.Sequence[float]] = None,
+                 sample_rate: int = 24000,
+                 normalized: bool = True,
+                 window: str = "hann_window"):
+        super().__init__()
+        
+        try:
+            import torchaudio
+            self.torchaudio_available = True
+        except ImportError:
+            self.torchaudio_available = False
+            print("Warning: torchaudio not available, using simplified mel conversion")
+        
+        self.scales = scales
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+        self.normalized = normalized
+        
+        if alpha_coeffs is None:
+            alpha_coeffs = [1.0] * len(scales)
+        self.alpha_coeffs = alpha_coeffs
+        
+        # Create mel filterbanks for each scale
+        self.mel_transforms = nn.ModuleList()
+        self.stft_params = []
+        
+        for i, scale in enumerate(scales):
+            window_size = 2 ** scale
+            hop_length = window_size // 4
+            
+            self.stft_params.append({
+                'n_fft': window_size,
+                'hop_length': hop_length,
+                'win_length': window_size,
+            })
+            
+            self.register_buffer(f"window_{i}", getattr(torch, window)(window_size))
+            
+            if self.torchaudio_available:
+                # Create mel transform using torchaudio
+                mel_transform = torchaudio.transforms.MelScale(
+                    n_mels=n_mels,
+                    sample_rate=sample_rate,
+                    n_stft=window_size // 2 + 1
+                )
+                self.mel_transforms.append(mel_transform)
+    
+    def forward(self, x_real: torch.Tensor, x_fake: torch.Tensor) -> torch.Tensor:
+        if x_real.dim() == 2:
+            x_real = x_real.unsqueeze(1)
+            x_fake = x_fake.unsqueeze(1)
+        elif x_real.dim() > 3:
+            x_real = x_real.view(x_real.shape[0], 1, -1)
+            x_fake = x_fake.view(x_fake.shape[0], 1, -1)
+        
+        total_loss = torch.tensor(0.0, device=x_real.device, dtype=x_real.dtype)
+        
+        for i, (scale, alpha) in enumerate(zip(self.scales, self.alpha_coeffs)):
+            params = self.stft_params[i]
+            window = getattr(self, f"window_{i}").to(x_real.device)
+            
+            # Compute STFT magnitude spectrograms
+            real_mag = _stft(x_real, params['n_fft'], params['hop_length'],
+                           params['win_length'], window, self.normalized)
+            fake_mag = _stft(x_fake, params['n_fft'], params['hop_length'],
+                           params['win_length'], window, self.normalized)
+            
+            # Convert to mel-spectrograms
+            if self.torchaudio_available:
+                # Use proper mel filterbank
+                B, C, T, F = real_mag.shape
+                real_mel = self.mel_transforms[i](real_mag.view(-1, T, F)).view(B, C, T, self.n_mels)
+                fake_mel = self.mel_transforms[i](fake_mag.view(-1, T, F)).view(B, C, T, self.n_mels)
+            else:
+                # Fallback to simple conversion
+                real_mel = mel_spectrogram(real_mag, self.n_mels, self.sample_rate, params['n_fft'])
+                fake_mel = mel_spectrogram(fake_mag, self.n_mels, self.sample_rate, params['n_fft'])
+            
+            # Compute L1 and L2 losses
+            l1_loss = F.l1_loss(fake_mel, real_mel)
+            l2_loss = F.mse_loss(fake_mel, real_mel)
+            
+            # Combine according to SoundStream equation (1)
+            scale_loss = l1_loss + alpha * l2_loss
+            total_loss += scale_loss
+        
+        total_loss = total_loss / (len(self.scales) * len(self.alpha_coeffs))
+        return total_loss
+
 class SoundStreamLoss(nn.Module):
     """
     SoundStream neural audio codec loss function.
