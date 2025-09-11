@@ -10,6 +10,7 @@ from model.soundrain import STFTDiscriminator
 from model.loss import DiscriminatorLoss
 plt.switch_backend('agg')
 
+import soundfile as sf
 
 class Trainer(BaseTrainer):
     def __init__(
@@ -22,29 +23,39 @@ class Trainer(BaseTrainer):
             train_dataloader,
             validation_dataloader,
     ):
-        super(Trainer, self).__init__(config, resume, model, loss_function, optimizer)
         self.train_data_loader = train_dataloader
         self.validation_data_loader = validation_dataloader
         
         # Initialize discriminators if using SoundStream loss
+        # This must be done before calling super().__init__ because resume checkpoint needs it
         self.use_discriminators = hasattr(loss_function, 'lambda_adv') and loss_function.lambda_adv > 0
         
+        # Initialize discriminator-related attributes to None first
+        self.stft_discriminator = None
+        self.stft_disc_optimizer = None
+        self.discriminator_loss_fn = None
+        self.disc_train_freq = config.get("discriminator_train_freq", 1)
+        
+        # Now call parent constructor which may call _resume_checkpoint
+        super(Trainer, self).__init__(config, resume, model, loss_function, optimizer)
+        
+        # Setup discriminators after parent initialization
         if self.use_discriminators:
             self._setup_discriminators(config)
             # Initialize discriminator loss function
             self.discriminator_loss_fn = DiscriminatorLoss()
-            # Set discriminator training frequency from config
-            self.disc_train_freq = config.get("discriminator_train_freq", 1)
     
     def _setup_discriminators(self, config):
         """Setup discriminators and their optimizers."""
         # Get discriminator config or use defaults
         disc_config = config.get("discriminator", {})
         
-        # STFT discriminator  
+        # STFT discriminator with multi-channel support
+        n_channels = disc_config.get("n_channels", 4)  # 4-channel spatial audio
         self.stft_discriminator = STFTDiscriminator(
             C=disc_config.get("stft_C", 32),
-            F_bins=disc_config.get("stft_F_bins", 1024)
+            F_bins=disc_config.get("stft_F_bins", 1024),
+            n_channels=n_channels
         ).to(self.device)
         
         # Multi-GPU support
@@ -60,6 +71,21 @@ class Trainer(BaseTrainer):
             lr=disc_lr, 
             betas=disc_betas
         )
+        
+        # Load discriminator checkpoint data if available
+        if hasattr(self, '_discriminator_checkpoint_data') and self._discriminator_checkpoint_data is not None:
+            print("Loading discriminator checkpoint data...")
+            
+            if isinstance(self.stft_discriminator, torch.nn.DataParallel):
+                self.stft_discriminator.module.load_state_dict(self._discriminator_checkpoint_data["stft_discriminator"])
+            else:
+                self.stft_discriminator.load_state_dict(self._discriminator_checkpoint_data["stft_discriminator"])
+            
+            if self._discriminator_checkpoint_data["stft_disc_optimizer"] is not None:
+                self.stft_disc_optimizer.load_state_dict(self._discriminator_checkpoint_data["stft_disc_optimizer"])
+            
+            # Clean up
+            del self._discriminator_checkpoint_data
     
     def _compute_stft(self, audio, n_fft=1024, hop_length=256, win_length=1024):
         """Compute STFT for STFT discriminator."""
@@ -149,13 +175,16 @@ class Trainer(BaseTrainer):
             # Generate reconstructed audio
             self.optimizer.zero_grad()
             reconstructed = self.model(audio_sig)
-            
+
+            # sf.write("./reconstructed_output.wav", reconstructed.detach().cpu().numpy()[0].T, 48000)
+            # sf.write("./original_output.wav", audio_sig.detach().cpu().numpy()[0].T, 48000)
+
             # Get discriminator outputs for loss computation
             if self.use_discriminators:
                 disc_real_outputs, disc_fake_outputs, _ = self._generator_step(audio_sig, reconstructed)
             else:
                 disc_real_outputs, disc_fake_outputs = None, None
-            
+
             # Compute generator loss using SoundStream loss
             gen_loss, loss_components = self.loss_function(
                 x_real=audio_sig,
@@ -164,12 +193,12 @@ class Trainer(BaseTrainer):
                 disc_fake_outputs=disc_fake_outputs
             )
 
-            gen_loss.backward()
+            # gen_loss.backward() # commented since loss balancer is taking care of this
             self.optimizer.step()
             
             # Train discriminators
             if self.use_discriminators and i % disc_train_freq == 0:
-                disc_losses = self._discriminator_step(audio_sig, reconstructed.detach())
+                disc_losses = self._discriminator_step(audio_sig, reconstructed.detach()) # detach to avoid gradients to generator
                 disc_loss_total += disc_losses['total_disc_loss']
                 
                 # Log discriminator losses
@@ -179,13 +208,22 @@ class Trainer(BaseTrainer):
 
             loss_total += gen_loss.item()
             
-            # Log detailed losses
+            # Log detailed losses including balancer metrics
             if i % 100 == 0 and hasattr(self.loss_function, 'forward'):
                 for key, value in loss_components.items():
                     if torch.is_tensor(value):
                         wandb.log({f"Loss/train_{key}": value.item()}, step=epoch * len(self.train_data_loader) + i)
                     else:
                         wandb.log({f"Loss/train_{key}": value}, step=epoch * len(self.train_data_loader) + i)
+                
+                # Log balancer gradient ratios if available
+                if hasattr(self.loss_function, 'balancer') and hasattr(self.loss_function.balancer, 'metrics'):
+                    balancer_metrics = self.loss_function.balancer.metrics
+                    for key, value in balancer_metrics.items():
+                        if torch.is_tensor(value):
+                            wandb.log({f"Balancer/{key}": value.item()}, step=epoch * len(self.train_data_loader) + i)
+                        else:
+                            wandb.log({f"Balancer/{key}": value}, step=epoch * len(self.train_data_loader) + i)
             
             if i % 100 == 0:
                 print(f"Batch {i}, Generator Loss: {gen_loss.item():.6f}")
@@ -321,14 +359,13 @@ class Trainer(BaseTrainer):
         else:
             self.model.load_state_dict(checkpoint["model"])
         
-        # Load discriminator states if they exist
+        # Store discriminator checkpoint data for later loading after discriminators are initialized
+        self._discriminator_checkpoint_data = None
         if self.use_discriminators and "stft_discriminator" in checkpoint:
-            if isinstance(self.stft_discriminator, torch.nn.DataParallel):
-                self.stft_discriminator.module.load_state_dict(checkpoint["stft_discriminator"])
-            else:
-                self.stft_discriminator.load_state_dict(checkpoint["stft_discriminator"])
-            
-            self.stft_disc_optimizer.load_state_dict(checkpoint["stft_disc_optimizer"])
+            self._discriminator_checkpoint_data = {
+                "stft_discriminator": checkpoint["stft_discriminator"],
+                "stft_disc_optimizer": checkpoint.get("stft_disc_optimizer", None)
+            }
 
         print(f"Model checkpoint loaded. Training will begin in {self.start_epoch} epoch.")
     

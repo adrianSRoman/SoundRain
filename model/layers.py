@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
-
+from torch.nn.utils import weight_norm
 
 class CausalConv1d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, pad_mode='reflect', **kwargs):
@@ -11,7 +11,7 @@ class CausalConv1d(nn.Module):
 
         self.pad_mode = pad_mode
         self.causal_padding = dilation * (kernel_size - 1) + (1 - stride)
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, **kwargs)
+        self.conv = weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size, **kwargs))
 
     def forward(self, x):
         x = F.pad(x, [self.causal_padding, 0], mode=self.pad_mode)
@@ -23,13 +23,13 @@ class CausalConvTranspose1d(nn.Module):
         super(CausalConvTranspose1d, self).__init__()
 
         self.upsample_factor = stride
-        self.conv = nn.ConvTranspose1d(
+        self.conv = weight_norm(nn.ConvTranspose1d(
             in_channels,
             out_channels,
             kernel_size,
             stride,
             **kwargs
-        )
+        ))
 
     def forward(self, x):
         n = x.shape[-1]

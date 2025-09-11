@@ -6,7 +6,7 @@ from einops import rearrange
 from torch.linalg import vector_norm
 import torchaudio
 import typing as tp
-
+from model.balancer import Balancer
 
 def mse_loss():
     return torch.nn.MSELoss()
@@ -278,10 +278,12 @@ class SoundStreamLoss(nn.Module):
                  hop_lengths: tp.Optional[tp.Sequence[int]] = None,
                  win_lengths: tp.Optional[tp.Sequence[int]] = None,
                  factor_sc: float = 0.1,
-                 factor_mag: float = 0.1):
+                 factor_mag: float = 0.1,
+                 balance_losses: bool = True,
+                 balance_ema_decay: float = 0.999):
         super().__init__()
         
-        # Loss weights
+        # Loss weights (used when balance_losses=False)
         self.lambda_rec = lambda_rec
         self.lambda_adv = lambda_adv
         self.lambda_fm = lambda_fm
@@ -295,6 +297,24 @@ class SoundStreamLoss(nn.Module):
             factor_sc=factor_sc,
             factor_mag=factor_mag
         )
+        
+        # Gradient balancer for stable multi-loss training
+        self.balance_losses = balance_losses
+        if balance_losses:
+            # Balancer weights - these represent desired relative importance
+            self.balancer = Balancer(
+                weights={
+                    'reconstruction': lambda_rec,
+                    'adversarial': lambda_adv, 
+                    'feature_matching': lambda_fm,
+                    'commitment': lambda_commit
+                },
+                balance_grads=True,
+                total_norm=1.0,
+                ema_decay=balance_ema_decay,
+                per_batch_item=True,
+                monitor=True  # Enable monitoring for debugging
+            )
     
     def reconstruction_loss(self, x_real, x_fake):
         """
@@ -346,7 +366,7 @@ class SoundStreamLoss(nn.Module):
         fm_loss = 0.0
         # Exclude final layer (discriminator score) from feature matching
         for real_feat, fake_feat in zip(disc_real_outputs[:-1], disc_fake_outputs[:-1]):
-            fm_loss += F.l1_loss(fake_feat, real_feat.detach())
+            fm_loss += F.l1_loss(fake_feat, real_feat.detach()) / torch.abs(real_feat.detach()).mean()
         # Average over number of feature layers
         num_layers = len(disc_real_outputs) - 1
         return fm_loss / max(num_layers, 1)
@@ -375,7 +395,7 @@ class SoundStreamLoss(nn.Module):
                 quantized=None,
                 encodings=None):
         """
-        Compute total generator loss.
+        Compute total generator loss with optional gradient balancing.
         
         Args:
             x_real: Ground truth audio [B, C, T] or [B, T]
@@ -391,9 +411,13 @@ class SoundStreamLoss(nn.Module):
         """
         losses = {}
         
-        # 1. Reconstruction Loss (STFT domain)
-        rec_loss = self.reconstruction_loss(x_real, x_fake)
-        losses['reconstruction'] = rec_loss
+        # 1.1 Reconstruction Loss (Time domain)
+        rec_loss_t = l1_loss()(x_real, x_fake)
+        losses['reconstruction_t'] = rec_loss_t
+
+        # 1.2 Reconstruction Loss (STFT domain)
+        rec_loss_f = self.reconstruction_loss(x_real, x_fake)
+        losses['reconstruction_f'] = rec_loss_f
         
         # 2. Adversarial Loss
         adv_loss = torch.tensor(0.0, device=x_real.device)
@@ -407,16 +431,37 @@ class SoundStreamLoss(nn.Module):
             fm_loss = self.feature_matching_loss(disc_real_outputs, disc_fake_outputs)
         losses['feature_matching'] = fm_loss
         
-        # 4. Commitment Loss
-        commit_loss = self.commitment_loss(quantized, encodings)
-        losses['commitment'] = commit_loss
+        # # 4. Commitment Loss
+        # commit_loss = self.commitment_loss(quantized, encodings)
+        # print("commitment", commit_loss)
+        # losses['commitment'] = commit_loss
         
-        # Total weighted loss
-        total_loss = (self.lambda_rec * rec_loss + 
-                     self.lambda_adv * adv_loss +
-                     self.lambda_fm * fm_loss + 
-                     self.lambda_commit * commit_loss)
-        
+        # Apply gradient balancing if enabled
+        if self.balance_losses and x_fake.requires_grad:
+            # Filter out zero losses to avoid balancer issues
+            active_losses = {k: v for k, v in losses.items() 
+                           if k in self.balancer.weights and v.item() >= 0}
+
+            if len(active_losses) > 1:  # Only balance if we have multiple active losses
+                # Use balancer for gradient balancing (implements Equation 5)
+                total_loss = self.balancer.backward(active_losses, x_fake)
+                
+                # Store balancer metrics for monitoring
+                balancer_metrics = self.balancer.metrics
+                losses.update({f'balance_{k}': v for k, v in balancer_metrics.items()})
+            else:
+                # Fallback to manual weighting
+                total_loss = (self.lambda_rec * (rec_loss_t + rec_loss_f) + 
+                             self.lambda_adv * adv_loss +
+                             self.lambda_fm * fm_loss) #+ 
+                            #  self.lambda_commit * commit_loss)
+        else:
+            # Manual weighted loss (original approach)
+            total_loss = (self.lambda_rec * rec_loss_f + 
+                         self.lambda_adv * adv_loss +
+                         self.lambda_fm * fm_loss) # + 
+                        #  self.lambda_commit * commit_loss)
+
         losses['total'] = total_loss
         return total_loss, losses
 
@@ -469,6 +514,8 @@ def soundstream_loss(**kwargs):
             - lambda_rec, lambda_adv, lambda_fm, lambda_commit: Loss weights
             - n_ffts, hop_lengths, win_lengths: STFT parameters
             - factor_sc, factor_mag: Spectral loss weighting factors
+            - balance_losses: Whether to use gradient balancing (default: True)
+            - balance_ema_decay: EMA decay for balancer (default: 0.999)
     """ 
     return SoundStreamLoss(**kwargs)
 
